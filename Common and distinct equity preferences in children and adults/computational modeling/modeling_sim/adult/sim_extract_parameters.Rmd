@@ -1,0 +1,135 @@
+
+```{r setup, include=FALSE}
+#rm(list=ls())
+require('knitr') 
+opts_chunk$set(tidy = FALSE, warning = FALSE, message = FALSE, cache = FALSE)
+
+#load libraries and functions
+suppressMessages(library('tidyverse')) # to organize data
+suppressMessages(library('rstan')) # for model fiting, using the sampling function
+rstan_options(auto_write = TRUE) #which allows you to automatically save a bare version of a compiled Stan program to the hard disk so that it does not need to be recompiled (unless you change it): https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started
+suppressMessages(library('loo'))   # for calculating looic and waic
+suppressMessages(library('data.table')) # to read data as data.table rather than data.frame.
+suppressMessages(library('bayesplot')) # to plot various figures for model checking
+suppressMessages(library('R.matlab')) # to save out .mat files
+suppressMessages(library('hypr')) # transfer hypothesis matrix to contrast matrix.
+
+
+#The following functions are adapted from the hBayesDM package (Ahn et al., 2017).
+source('./supp_funcs/func01_prepro.R') #preparing the data for the stan:                         change for each project
+source('./supp_funcs/func04_extract_ic.R') #extract looic and waic of the model:                 no chnage needed
+source('./supp_funcs/func05_printfit.R') #print looic and waic of the model and their weights:   no change needed
+source('./supp_funcs/estimate_mode.R') #estimate the mode (众数) of the posterior distribution:  no change needed
+
+options(max.print = 99999) # for ploting all results of fitted model
+```
+
+1. load the csv data.
+```{r}
+raw_data                     <- fread(file='sim_data_adult.csv') #load as data.table: https://digitaschools.com/read-csv-in-r-importing-data/
+raw_data                     <- subset(raw_data,select = -c(14)) #delete a column,diff from delete a col from data.frame
+data_df                      <- raw_data
+```
+
+2. data describing.
+```{r}
+# 1. Target variable: (1) choice: position of the current pool
+# 2. Predictor variable:  (1) rate_s (1,2,3 or -1,-2,-3); (2) rate_o(1,2,3 or -1,-2,-3)
+# 3. supporting variables: subid (n=29), trial(1:160),pool, party(1=FP[self];2=TP[other]),frame(1=pos;2=neg)
+```
+
+3. data cleaning
+```{r}
+
+#1. only left the necessary variables
+data_df <- data_df[,c('subid','trial','choice','rate_s','rate_o','pool','party','frame')]
+
+
+#2. convert trial, ignoring block number
+data_df <- data_df %>%
+  group_by(subid) %>%
+  mutate(trial = 1:n()) %>% ungroup() # this is the real number of trials for each subject.
+
+data_df <- as.data.table(data_df)
+class(data_df)
+```
+
+4. preparing data for stan
+```{r data loading}
+
+colnames_data_df <- colnames(data_df)
+
+subjs    <- NULL   # List of unique subjects (1D)
+n_subj   <- NULL   # Total number of subjects (0D)
+t_subjs  <- NULL   # Number of trials per subject (2D or 1D)
+t_max    <- NULL   # Maximum number of trials across all subjects (0D)
+
+.N       <- NULL
+
+DT_trials <- data_df[, .N, by = c('subid')] #get the number of trials for each sub, data.table
+
+subjs     <- DT_trials$subid    # sub IDs
+n_subj    <- length(subjs)      # no. of subs
+t_subjs   <- DT_trials$N # number of trials for each sub
+t_max     <- max(t_subjs) # maximal no. of trials across all subs.
+
+gen_file <- 1 #whether or not generate a data file, only generating for main analysis, not for simulation analysis
+pfix     <- '_adult'
+
+general_info        <- list(subjs, n_subj, t_subjs, t_max,gen_file,pfix)
+names(general_info) <- c('subjs', 'n_subj', 't_subjs', 't_max','gen_file','pfix')
+
+data_list <- prepro_func(data_df,general_info)  # get the data ready for stan; MUST check the 'func01_prepro.R' file in the 'supp_funcs' directory!!!!!!!
+```
+5.8 extract parameters
+```{r set up model 5b}
+
+load('./stan_output/sim_fit_m4a_adult.RData')
+
+###########################################################################individual paramters#######################################################################
+# Extract from the Stan fit object
+parVals <- rstan::extract(fit_m4a_adult, permuted = TRUE)
+
+# Define measurement of individual parameters
+indPars <- "mean" #extracting mean of parameters
+measure_indPars <- switch(indPars, mean = mean, median = median, mode = estimate_mode)
+which_indPars <- c('alpha11','alpha12','alpha21','alpha22','beta11','beta12','beta21','beta22','tau') #vectors
+
+multp_which_indPars <- NULL  # matrix
+
+# Measure all individual parameters (per subject)
+allIndPars <- as.data.frame(array(NA, c(n_subj, length(which_indPars))))
+m_allIndPars <- as.data.frame(array(NA, c(n_subj, 50))) #'50' here is an arbitrary value, just to make sure that the number of parameters are below this value.
+m_names  <- rep(NULL,50)
+for (i in 1:n_subj) {
+  
+  allIndPars[i, ] <- mapply(function(x) measure_indPars(parVals[[x]][, i]), which_indPars)
+  
+  if (length(multp_which_indPars)>0){  # for parameters in the matrix form
+    count <-0
+    for (nm in 1: length(multp_which_indPars)){
+      for (ds in 1:dim(parVals[[multp_which_indPars[nm]]])[3]){
+        count <- count + 1
+        m_allIndPars[i, count] <- sapply(list(parVals[[multp_which_indPars[nm]]][, i,ds]),function(x) measure_indPars(x))
+        m_names[count] <- paste0(multp_which_indPars[nm],ds)
+      }
+    }
+  }
+}
+
+if (length(multp_which_indPars)>0){
+  m_allIndPars <- m_allIndPars[,1:count]
+  m_allIndPars <- as.data.frame(m_allIndPars)
+  m_names      <- m_names[1:count]
+  
+  allIndPars <- cbind(subjs, allIndPars,m_allIndPars)
+  colnames(allIndPars) <- c("subjid", which_indPars,m_names)
+} else {
+  allIndPars <- cbind(subjs, allIndPars)
+  colnames(allIndPars) <- c("subjid", which_indPars) 
+}
+
+
+write.csv(allIndPars,file='sim_IndPars_fitm4a_adult.csv',row.names = FALSE)
+
+```

@@ -1,0 +1,192 @@
+---
+title: 'DG_model'
+author: 'Chunliang Feng (SCNU)'
+date: March, 14, 2023
+output:
+  html_document:
+    code_folding: hide
+---
+```{r setup, include=FALSE}
+#rm(list=ls())
+require('knitr') 
+opts_chunk$set(tidy = FALSE, warning = FALSE, message = FALSE, cache = FALSE)
+
+#load libraries and functions
+suppressMessages(library('tidyverse')) # to organize data
+suppressMessages(library('rstan')) # for model fiting, using the sampling function
+rstan_options(auto_write = TRUE) #which allows you to automatically save a bare version of a compiled Stan program to the hard disk so that it does not need to be recompiled (unless you change it): https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started
+suppressMessages(library('loo'))   # for calculating looic and waic
+suppressMessages(library('data.table')) # to read data as data.table rather than data.frame.
+suppressMessages(library('bayesplot')) # to plot various figures for model checking
+suppressMessages(library('R.matlab')) # to save out .mat files
+suppressMessages(library('hypr')) # transfer hypothesis matrix to contrast matrix.
+
+
+#The following functions are adapted from the hBayesDM package (Ahn et al., 2017).
+source('./supp_funcs/func01_prepro.R') #preparing the data for the stan:                         change for each project
+source('./supp_funcs/func04_extract_ic.R') #extract looic and waic of the model:                 no chnage needed
+source('./supp_funcs/func05_printfit.R') #print looic and waic of the model and their weights:   no change needed
+source('./supp_funcs/estimate_mode.R') #estimate the mode (众数) of the posterior distribution:  no change needed
+
+options(max.print = 99999) # for ploting all results of fitted model
+```
+
+1. load the csv data.
+```{r}
+raw_data                     <- fread(file='data_adult.csv') #load as data.table: https://digitaschools.com/read-csv-in-r-importing-data/
+raw_data                     <- subset(raw_data,select = -c(14)) #delete a column,diff from delete a col from data.frame
+data_df                      <- raw_data
+```
+
+2. data describing.
+```{r}
+# 1. Target variable: (1) choice: position of the current pool
+# 2. Predictor variable:  (1) rate_s (1,2,3 or -1,-2,-3); (2) rate_o(1,2,3 or -1,-2,-3)
+# 3. supporting variables: subid (n=29), trial(1:160),pool, party(1=FP[self];2=TP[other]),frame(1=pos;2=neg)
+```
+
+3. data cleaning
+```{r}
+
+#1. only left the necessary variables
+data_df <- data_df[,c('subid','trial','choice','rate_s','rate_o','pool','party','frame')]
+
+
+#2. convert trial, ignoring block number
+data_df <- data_df %>%
+  group_by(subid) %>%
+  mutate(trial = 1:n()) %>% ungroup() # this is the real number of trials for each subject.
+
+data_df <- as.data.table(data_df)
+class(data_df)
+```
+
+4. preparing data for stan
+```{r data loading}
+
+colnames_data_df <- colnames(data_df)
+
+subjs    <- NULL   # List of unique subjects (1D)
+n_subj   <- NULL   # Total number of subjects (0D)
+t_subjs  <- NULL   # Number of trials per subject (2D or 1D)
+t_max    <- NULL   # Maximum number of trials across all subjects (0D)
+
+.N       <- NULL
+
+DT_trials <- data_df[, .N, by = c('subid')] #get the number of trials for each sub, data.table
+
+subjs     <- DT_trials$subid    # sub IDs
+n_subj    <- length(subjs)      # no. of subs
+t_subjs   <- DT_trials$N # number of trials for each sub
+t_max     <- max(t_subjs) # maximal no. of trials across all subs.
+
+gen_file <- 1 #whether or not generate a data file, only generating for main analysis, not for simulation analysis
+pfix     <- '_adult'
+
+general_info        <- list(subjs, n_subj, t_subjs, t_max,gen_file,pfix)
+names(general_info) <- c('subjs', 'n_subj', 't_subjs', 't_max','gen_file','pfix')
+
+data_list <- prepro_func(data_df,general_info)  # get the data ready for stan; MUST check the 'func01_prepro.R' file in the 'supp_funcs' directory!!!!!!!
+```
+
+
+
+5.1 set up model 4, 
+```{r set up model 4}
+ncore <- 3
+options(mc.cores = ncore) #adapted from hBayesDM_model.R
+rstan_options(javascript=FALSE) # see also: https://discourse.mc-stan.org/t/error-in-open-connection-con-open-mode-timeout-was-reached-github-com/23162/6
+
+#model 4, Fehr-Schmidt inequity aversion model, three parameters: alpha, beta, tau
+pars_m4a_adult <- c('mu_alpha11','mu_alpha12','mu_alpha21','mu_alpha22','mu_beta11','mu_beta12','mu_beta21','mu_beta22','mu_tau','sigma','alpha11','alpha12','alpha21','alpha22','beta11','beta12','beta21','beta22','tau','log_lik')
+fit_m4a_adult <- stan(file=paste0(getwd(),'/stan_model/m4a_tradeoff.stan'), data=data_list,
+                        pars    = pars_m4a_adult,
+                        chains  = 3,
+                        iter    = 4000,
+                        warmup  = 2000,
+                        thin    = 1,
+                        control = list(adapt_delta   = 0.95,
+                                       stepsize      = 1,
+                                       max_treedepth = 10))
+
+#################################################################model fit & save model & plots#############################################################
+save(fit_m4a_adult,file='./stan_output/fit_m4a_adult.RData')
+printFit(fit_m4a_adult,ic='both')
+
+```
+
+5.2 set up model 1, 
+```{r set up model 1}
+ncore <- 3
+options(mc.cores = ncore) #adapted from hBayesDM_model.R
+rstan_options(javascript=FALSE) # see also: https://discourse.mc-stan.org/t/error-in-open-connection-con-open-mode-timeout-was-reached-github-com/23162/6
+
+#model 1, Advantageous inequity aversion model, two parameters: alpha, tau
+pars_m1a_adult <- c('mu_alpha11','mu_alpha12','mu_alpha21','mu_alpha22','mu_tau','sigma','alpha11','alpha12','alpha21','alpha22','tau','log_lik')
+fit_m1a_adult <- stan(file=paste0(getwd(),'/stan_model/m1a_tradeoff.stan'), data=data_list,
+                         pars    = pars_m1a_adult,
+                         chains  = 3,
+                         iter    = 4000,
+                         warmup  = 2000,
+                         thin    = 1,
+                         control = list(adapt_delta   = 0.95,
+                                        stepsize      = 1,
+                                        max_treedepth = 10))
+
+#################################################################model fit & save model & plots#############################################################
+save(fit_m1a_adult,file='./stan_output/fit_m1a_adult.RData')
+printFit(fit_m1a_adult,ic='both')
+
+
+```
+
+
+5.3 set up model 2, 
+```{r set up model 2}
+ncore <- 3
+options(mc.cores = ncore) #adapted from hBayesDM_model.R
+rstan_options(javascript=FALSE) # see also: https://discourse.mc-stan.org/t/error-in-open-connection-con-open-mode-timeout-was-reached-github-com/23162/6
+
+#model 2, Disadvantageous inequity aversion model, two parameters: beta,  tau
+pars_m2a_adult <- c('mu_beta11','mu_beta12','mu_beta21','mu_beta22','mu_tau','sigma','beta11','beta12','beta21','beta22','tau','log_lik')
+fit_m2a_adult <- stan(file=paste0(getwd(),'/stan_model/m2a_tradeoff.stan'), data=data_list,
+                         pars    = pars_m2a_adult,
+                         chains  = 3,
+                         iter    = 4000,
+                         warmup  = 2000,
+                         thin    = 1,
+                         control = list(adapt_delta   = 0.95,
+                                        stepsize      = 1,
+                                        max_treedepth = 10))
+
+#################################################################model fit & save model & plots#############################################################
+save(fit_m2a_adult,file='./stan_output/fit_m2a_adult.RData')
+printFit(fit_m2a_adult,ic='both')
+
+
+```
+
+5.4 set up model 3, 
+```{r set up model 3}
+ncore <- 3
+options(mc.cores = ncore) #adapted from hBayesDM_model.R
+rstan_options(javascript=FALSE) # see also: https://discourse.mc-stan.org/t/error-in-open-connection-con-open-mode-timeout-was-reached-github-com/23162/6
+
+#model 3, General inequity aversion model, two parameters: omega(alpha), tau
+pars_m3a_adult <- c('mu_alpha11','mu_alpha12','mu_alpha21','mu_alpha22','mu_tau','sigma','alpha11','alpha12','alpha21','alpha22','tau','log_lik')
+fit_m3a_adult <- stan(file=paste0(getwd(),'/stan_model/m3a_tradeoff.stan'), data=data_list,
+                         pars    = pars_m3a_adult,
+                         chains  = 3,
+                         iter    = 4000,
+                         warmup  = 2000,
+                         thin    = 1,
+                         control = list(adapt_delta   = 0.95,
+                                        stepsize      = 1,
+                                        max_treedepth = 10))
+
+#################################################################model fit & save model & plots#############################################################
+save(fit_m3a_adult,file='./stan_output/fit_m3a_adult.RData')
+printFit(fit_m3a_adult,ic='both')
+
+
+```
